@@ -3,7 +3,7 @@ mod fill;
 use crate::fill::{FillBuild, fetch_project_versions};
 use clap::Parser;
 use futures::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use md5::Md5;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -29,7 +29,8 @@ struct HashedBuild {
 
 #[derive(Debug)]
 enum HashingError {
-  DownloadFailed,
+  BadStatus(u16),
+  DownloadFailed(reqwest::Error),
   DownloadFailedNoBody,
   Sha256Mismatch,
 }
@@ -44,20 +45,28 @@ async fn main() {
 
   let client = Client::builder()
     .timeout(Duration::from_mins(10))
-    .default_headers(headers).build().expect("Failed to build reqwest client.");
+    .default_headers(headers)
+    .build()
+    .expect("Failed to build reqwest client.");
 
   let builds = get_all_builds(&args, &client, "paper").await;
 
-  let progress = ProgressBar::new(builds.len() as u64);
-  progress.set_style(
-    ProgressStyle::with_template("{bar:50.blue/cyan} {pos}/{len} ({elapsed}) {msg}").unwrap()
-  );
-  progress.enable_steady_tick(Duration::from_millis(50));
+  let total_bytes: u64 = builds.iter().map(|b| b.size).sum();
+
+  let progress = MultiProgress::new();
+
+  let builds_bar = progress.add(ProgressBar::new(builds.len() as u64));
+  builds_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {pos}/{len} ({elapsed}) {msg}").unwrap());
+  builds_bar.enable_steady_tick(Duration::from_millis(50));
+
+  let bytes_bar = progress.add(ProgressBar::new(total_bytes));
+  bytes_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {eta})").unwrap());
+  builds_bar.enable_steady_tick(Duration::from_millis(50));
 
   let hashed_builds: Vec<Result<HashedBuild, HashingError>> = futures::stream::iter(builds)
-    .map(|build| hash_build(build, &client))
+    .map(|build| hash_build(build, &client, bytes_bar.clone()))
     .buffer_unordered(args.buffer_size.unwrap_or(32))
-    .inspect(|_| progress.inc(1))
+    .inspect(|_| builds_bar.inc(1))
     .collect()
     .await;
 
@@ -70,10 +79,11 @@ async fn main() {
       }
       Err(err) => format!("Failed to hash: {:?}", err),
     };
-    progress.println(build_str);
+    builds_bar.println(build_str);
   }
 
-  progress.finish_with_message("Done!");
+  builds_bar.finish_with_message("Done!");
+  bytes_bar.finish();
 }
 
 async fn get_all_builds(args: &Args, client: &Client, project: &str) -> Vec<FillBuild> {
@@ -102,13 +112,28 @@ async fn get_all_builds(args: &Args, client: &Client, project: &str) -> Vec<Fill
   all_builds
 }
 
-async fn hash_build(build: FillBuild, client: &Client) -> Result<HashedBuild, HashingError> {
-  let response = client.get(&build.url).send().await.map_err(|_| HashingError::DownloadFailed)?;
-  let bytes = response.bytes().await.map_err(|_| HashingError::DownloadFailedNoBody)?;
-  let sha256 = hex::encode(Sha256::digest(&bytes));
-  if !sha256.eq(&build.sha256) {
+async fn hash_build(build: FillBuild, client: &Client, bytes_bar: ProgressBar) -> Result<HashedBuild, HashingError> {
+  let response = client.get(&build.url).send().await.map_err(|err| HashingError::DownloadFailed(err))?;
+  if !response.status().is_success() {
+    return Err(HashingError::BadStatus(response.status().as_u16()));
+  }
+
+  let mut sha256_hasher = Sha256::new();
+  let mut md5_hasher = Md5::new();
+
+  let mut stream = response.bytes_stream();
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.map_err(|_| HashingError::DownloadFailedNoBody)?;
+    sha256_hasher.update(&chunk);
+    md5_hasher.update(&chunk);
+    bytes_bar.inc(chunk.len() as u64);
+  }
+
+  let sha256 = hex::encode(sha256_hasher.finalize());
+  if sha256 != build.sha256 {
     return Err(HashingError::Sha256Mismatch);
   }
-  let md5 = hex::encode(Md5::digest(&bytes));
+
+  let md5 = hex::encode(md5_hasher.finalize());
   Ok(HashedBuild { fill_build: build, md5 })
 }
