@@ -35,7 +35,7 @@ pub struct Args {
   pub file_path: Option<String>,
 
   /// The project to iterate all builds in.
-  #[arg(long, short, required = true)]
+  #[arg(long, short, required = true, num_args = 1..)]
   pub projects: Vec<String>,
 
   /// The fill endpoint to use.
@@ -161,7 +161,4 @@ async fn run_for_project(args: &Args, client: &Client, project: &str) {
   if !args.skip_timeout {
     sleep(Duration::from_secs(2)).await;
   }
-
-  println!();
-  println!();
 }
