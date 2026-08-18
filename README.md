@@ -1,7 +1,7 @@
-# fill-build-hasher
+# 🚢 fill-build-hasher
 
-A simple CLI tool written in Rust that can iterate through all builds from a [fill](https://github.com/PaperMC/fill)-provided project and compute
-their MD5 hash.
+A simple CLI tool written in Rust that can iterate through all builds from a [fill](https://github.com/PaperMC/fill)-provided project and compute their MD5
+hash.
 
 ## Usage
 
@@ -23,6 +23,7 @@ Options:
 ## Example usage
 
 To compute the MD5 for every build inside the projects `folia`, `paper`, `waterfall`, and `velocity` into a single CSV file `md5.csv`, you can use this command:
+
 ```bash
 ./fill-build-hasher --projects folia paper waterfall velocity --file-path md5.csv
 ```
