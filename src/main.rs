@@ -78,7 +78,7 @@ async fn main() {
   headers.append("accept", HeaderValue::from_static("application/json"));
 
   let client = &Client::builder()
-    .timeout(Duration::from_mins(10))
+    .timeout(Duration::from_mins(60))
     .default_headers(headers)
     .build()
     .expect("Failed to build reqwest client.");
@@ -95,7 +95,10 @@ async fn run_for_project(args: &Args, client: &Client, project: &str) {
   let finished_builds = CsvWriter::read_existing(args, project);
 
   let builds_len = builds.len() as u64;
-  let builds: Vec<FillBuild> = builds.into_iter().filter(|b| !finished_builds.contains(&(b.version.clone(), b.id))).collect();
+  let builds: Vec<FillBuild> = builds
+    .into_iter()
+    .filter(|b| !finished_builds.contains(&(project.to_string(), b.version.clone(), b.id)))
+    .collect();
 
   let skipped_builds = builds_len - builds.len() as u64;
   if skipped_builds > 0 {
@@ -127,7 +130,6 @@ async fn run_for_project(args: &Args, client: &Client, project: &str) {
           ExponentialBackoff::from_millis(500).map(jitter).take(args.retries),
           || HashingResult::hash_build(&build, client, bytes_bar_clone),
           |err: &HashingError| match err {
-            HashingError::Sha256Mismatch => false,
             HashingError::BadStatus(code) => *code >= 500,
             _ => true,
           },

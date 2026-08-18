@@ -12,21 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            asset_name: fill-build-hasher-x86_64-unknown-linux-gnu
-            rename_command: |
-              mv target/release/fill-build-hasher target/release/fill-build-hasher-x86_64-unknown-linux-gnu
-
-          - os: macos-latest
-            asset_name: fill-build-hasher-x86_64-apple-darwin
-            rename_command: |
-              mv target/release/fill-build-hasher target/release/fill-build-hasher-x86_64-apple-darwin
-
-          - os: windows-latest
-            rename_command: |
-              cd target/release
-              ren "fill-build-hasher.exe" "fill-build-hasher-x86_64-pc-windows-msvc.exe"
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout code

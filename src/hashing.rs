@@ -30,19 +30,25 @@ impl HashingResult {
     let mut sha256_hasher = Sha256::new();
     let mut md5_hasher = Md5::new();
 
+    let mut bytes_this_attempt: u64 = 0;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
       let chunk = match chunk {
         Ok(ok) => ok,
-        Err(_) => return Err(HashingError::DownloadFailedNoBody),
+        Err(_) => {
+          bytes_bar.dec(bytes_this_attempt);
+          return Err(HashingError::DownloadFailedNoBody)
+        },
       };
       sha256_hasher.update(&chunk);
       md5_hasher.update(&chunk);
       bytes_bar.inc(chunk.len() as u64);
+      bytes_this_attempt += chunk.len() as u64;
     }
 
     let sha256 = hex::encode(sha256_hasher.finalize());
     if sha256 != build.sha256 {
+      bytes_bar.dec(bytes_this_attempt);
       return Err(HashingError::Sha256Mismatch);
     }
 

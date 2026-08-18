@@ -39,7 +39,7 @@ impl CsvWriter {
     args.file_path.clone().unwrap_or(format!("{}.csv", project))
   }
 
-  pub fn read_existing(args: &Args, project: &str) -> HashSet<(String, u16)> {
+  pub fn read_existing(args: &Args, project: &str) -> HashSet<(String, String, u16)> {
     let path = Self::path(args, project);
     let file = match File::open(&path) {
       Ok(file) => file,
@@ -49,10 +49,7 @@ impl CsvWriter {
 
     Reader::from_reader(file)
       .deserialize::<HashedFillBuild>()
-      .map(|val| {
-        let val = val.unwrap();
-        (val.version, val.build)
-      })
+      .filter_map(|val| val.ok().map(|v| (v.project, v.version, v.build)))
       .collect()
   }
 
