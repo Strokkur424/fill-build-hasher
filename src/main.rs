@@ -12,6 +12,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::time::Duration;
+use tokio::time::sleep;
 use tokio_retry::RetryIf;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
@@ -35,11 +36,15 @@ pub struct Args {
 
   /// The project to iterate all builds in.
   #[arg(long, short, required = true)]
-  pub project: String,
+  pub projects: Vec<String>,
 
   /// The fill endpoint to use.
   #[arg(long, default_value = "https://fill.papermc.io/v3")]
   pub endpoint: String,
+
+  /// Whether to skip the timeout between different project hashing.
+  #[arg(long, default_value = "false")]
+  pub skip_timeout: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -78,8 +83,16 @@ async fn main() {
     .build()
     .expect("Failed to build reqwest client.");
 
-  let builds = FillBuild::get_all_builds(args, client, args.project.clone()).await;
-  let finished_builds = CsvWriter::read_existing(args, args.project.as_str());
+  for project in &args.projects {
+    run_for_project(args, client, project.as_str()).await;
+  }
+}
+
+async fn run_for_project(args: &Args, client: &Client, project: &str) {
+  println!("Starting download for project: {project}");
+
+  let builds = FillBuild::get_all_builds(args, client, project).await;
+  let finished_builds = CsvWriter::read_existing(args, project);
 
   let builds_len = builds.len() as u64;
   let builds: Vec<FillBuild> = builds.into_iter().filter(|b| !finished_builds.contains(&(b.version.clone(), b.id))).collect();
@@ -102,7 +115,7 @@ async fn main() {
   bytes_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {eta})").unwrap());
   builds_bar.enable_steady_tick(Duration::from_millis(50));
 
-  let writer = CsvWriter::spawn(args, args.project.as_str());
+  let writer = CsvWriter::spawn(args, project);
 
   futures::stream::iter(builds)
     .map(|build| {
@@ -140,6 +153,13 @@ async fn main() {
     .await;
 
   writer.close().await;
+
+  progress.remove(&bytes_bar);
   builds_bar.finish_with_message("Done!");
-  bytes_bar.finish();
+  if !args.skip_timeout {
+    sleep(Duration::from_secs(2)).await;
+  }
+
+  println!();
+  println!();
 }

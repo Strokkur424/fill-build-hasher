@@ -76,24 +76,24 @@ impl FillBuild {
 }
 
 impl FillBuild {
-  pub async fn get_all_builds(args: &Args, client: &Client, project: String) -> Vec<FillBuild> {
-    let mut requests_count: u32 = 0;
+  pub async fn get_all_builds(args: &Args, client: &Client, project: &str) -> Vec<FillBuild> {
+    // let mut requests_count: u32 = 0;
     let mut all_builds: Vec<FillBuild> = Vec::new();
 
     let versions = Retry::start(ExponentialBackoff::from_millis(500).map(jitter).take(args.retries), || {
-      fetch_project_versions(client, args.endpoint.clone(), project.as_str())
+      fetch_project_versions(client, args.endpoint.clone(), project)
     })
     .await
     .unwrap_or_else(|err| panic!("Failed to fetch versions for {project} after retries: {err}"));
-    requests_count += 1;
+    // requests_count += 1;
 
     for version in versions {
       let builds = Retry::start(ExponentialBackoff::from_millis(500).map(jitter).take(args.retries), || {
-        FillBuild::from_url(client, args.endpoint.clone(), project.clone(), version.clone())
+        FillBuild::from_url(client, args.endpoint.clone(), project, version.clone())
       })
       .await
       .unwrap_or_else(|err| panic!("Failed to fetch builds for {project} {version} after retries: {err}"));
-      requests_count += 1;
+      // requests_count += 1;
       all_builds.extend(builds);
 
       if args.limit.is_some() && all_builds.len() > args.limit.unwrap() as usize {
@@ -106,11 +106,11 @@ impl FillBuild {
     }
 
     println!();
-    println!("Total API requests: {requests_count}");
+    // println!("Total API requests: {requests_count}");
     all_builds
   }
 
-  pub async fn from_url(client: &Client, fill: String, project: String, version: String) -> Result<Vec<FillBuild>, FillError> {
+  pub async fn from_url(client: &Client, fill: String, project: &str, version: String) -> Result<Vec<FillBuild>, FillError> {
     let res = client
       .get(format!("{fill}/projects/{project}/versions/{version}/builds"))
       .send()
@@ -125,7 +125,7 @@ impl FillBuild {
         .text()
         .await
         .map_err(|err| format!("Failed to fetch builds for {project} {version}: {err}"))?,
-      project.clone(),
+      project.to_string(),
       version.clone(),
     )
     .map_err(|err| format!("Failed to fetch builds for {project} {version}: {err}"))
