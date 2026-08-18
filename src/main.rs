@@ -24,7 +24,17 @@ struct Args {
 
 struct HashedBuild {
   fill_build: FillBuild,
-  md5: String,
+  md5: Result<String, HashingError>,
+}
+
+impl HashedBuild {
+  fn err(fill_build: FillBuild, err: HashingError) -> Self {
+    Self { fill_build, md5: Err(err) }
+  }
+
+  fn ok(fill_build: FillBuild, md5: String) -> Self {
+    Self { fill_build, md5: Ok(md5) }
+  }
 }
 
 #[derive(Debug)]
@@ -33,6 +43,17 @@ enum HashingError {
   DownloadFailed(reqwest::Error),
   DownloadFailedNoBody,
   Sha256Mismatch,
+}
+
+impl HashingError {
+  pub fn to_string(&self) -> String {
+    match self {
+      HashingError::BadStatus(code) => format!("Bad return code: {}", code),
+      HashingError::DownloadFailed(err) => format!("Failed to download: {}", err),
+      HashingError::DownloadFailedNoBody => "Failed to download: no body returned".to_string(),
+      HashingError::Sha256Mismatch => "Invalid Sha256 of downloaded artefact".to_string(),
+    }
+  }
 }
 
 #[tokio::main]
@@ -63,7 +84,7 @@ async fn main() {
   bytes_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {eta})").unwrap());
   builds_bar.enable_steady_tick(Duration::from_millis(50));
 
-  let hashed_builds: Vec<Result<HashedBuild, HashingError>> = futures::stream::iter(builds)
+  let hashed_builds: Vec<HashedBuild> = futures::stream::iter(builds)
     .map(|build| hash_build(build, &client, bytes_bar.clone()))
     .buffer_unordered(args.buffer_size.unwrap_or(32))
     .inspect(|_| builds_bar.inc(1))
@@ -71,13 +92,12 @@ async fn main() {
     .await;
 
   for build in hashed_builds {
-    let build_str = match build {
-      Ok(hashed) => {
-        let name = hashed.fill_build.name;
-        let md5 = hashed.md5;
-        format!("MD5 hash of {name} is {md5}")
+    let name = build.fill_build.name;
+    let build_str = match build.md5 {
+      Ok(hash) => {
+        format!("MD5 hash of {name} is {hash}")
       }
-      Err(err) => format!("Failed to hash: {:?}", err),
+      Err(err) => format!("Failed to hash {name}: {}", err.to_string()),
     };
     builds_bar.println(build_str);
   }
@@ -112,10 +132,15 @@ async fn get_all_builds(args: &Args, client: &Client, project: &str) -> Vec<Fill
   all_builds
 }
 
-async fn hash_build(build: FillBuild, client: &Client, bytes_bar: ProgressBar) -> Result<HashedBuild, HashingError> {
-  let response = client.get(&build.url).send().await.map_err(|err| HashingError::DownloadFailed(err))?;
+async fn hash_build(build: FillBuild, client: &Client, bytes_bar: ProgressBar) -> HashedBuild {
+  let response = client.get(&build.url).send().await;
+  let response = match response {
+    Ok(ok) => ok,
+    Err(e) => return HashedBuild::err(build, HashingError::DownloadFailed(e)),
+  };
+
   if !response.status().is_success() {
-    return Err(HashingError::BadStatus(response.status().as_u16()));
+    return HashedBuild::err(build, HashingError::BadStatus(response.status().as_u16()));
   }
 
   let mut sha256_hasher = Sha256::new();
@@ -123,7 +148,10 @@ async fn hash_build(build: FillBuild, client: &Client, bytes_bar: ProgressBar) -
 
   let mut stream = response.bytes_stream();
   while let Some(chunk) = stream.next().await {
-    let chunk = chunk.map_err(|_| HashingError::DownloadFailedNoBody)?;
+    let chunk = match chunk {
+      Ok(ok) => ok,
+      Err(_) => return HashedBuild::err(build, HashingError::DownloadFailedNoBody),
+    };
     sha256_hasher.update(&chunk);
     md5_hasher.update(&chunk);
     bytes_bar.inc(chunk.len() as u64);
@@ -131,9 +159,9 @@ async fn hash_build(build: FillBuild, client: &Client, bytes_bar: ProgressBar) -
 
   let sha256 = hex::encode(sha256_hasher.finalize());
   if sha256 != build.sha256 {
-    return Err(HashingError::Sha256Mismatch);
+    return HashedBuild::err(build, HashingError::Sha256Mismatch);
   }
 
   let md5 = hex::encode(md5_hasher.finalize());
-  Ok(HashedBuild { fill_build: build, md5 })
+  HashedBuild::ok(build, md5)
 }

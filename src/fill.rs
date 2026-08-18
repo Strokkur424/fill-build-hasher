@@ -53,7 +53,7 @@ pub struct FillBuild {
   pub name: String,
   pub sha256: String,
   pub url: String,
-  pub size: u64
+  pub size: u64,
 }
 
 impl From<FillBuildResponse> for FillBuild {
@@ -63,7 +63,7 @@ impl From<FillBuildResponse> for FillBuild {
       name: value.downloads.server_default.name,
       sha256: value.downloads.server_default.checksums.sha256,
       url: value.downloads.server_default.url,
-      size: value.downloads.server_default.size
+      size: value.downloads.server_default.size,
     }
   }
 }
