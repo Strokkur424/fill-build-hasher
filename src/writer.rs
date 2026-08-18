@@ -1,8 +1,10 @@
 use crate::Args;
 use crate::hashing::HashingResult;
-use csv::Writer;
+use csv::{Reader, WriterBuilder};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::collections::HashSet;
+use std::fs::{File, OpenOptions, metadata};
+use std::io::ErrorKind::NotFound;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
@@ -33,14 +35,39 @@ pub struct CsvWriter {
 }
 
 impl CsvWriter {
-  pub fn spawn(args: &Args, project: String) -> Self {
+  fn path(args: &Args, project: &str) -> String {
+    args.file_path.clone().unwrap_or(format!("{}.csv", project))
+  }
+
+  pub fn read_existing(args: &Args, project: &str) -> HashSet<(String, u16)> {
+    let path = Self::path(args, project);
+    let file = match File::open(&path) {
+      Ok(file) => file,
+      Err(err) if err.kind() == NotFound => return HashSet::new(),
+      Err(err) => panic!("Failed to open existing csv file {path}: {err}"),
+    };
+
+    Reader::from_reader(file)
+      .deserialize::<HashedFillBuild>()
+      .map(|val| {
+        let val = val.unwrap();
+        (val.version, val.build)
+      })
+      .collect()
+  }
+
+  pub fn spawn(args: &Args, project: &str) -> Self {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<HashedFillBuild>(128);
-    let path = args.file_path.clone();
-    let path = path.unwrap_or(format!("{}.csv", project));
+    let path = CsvWriter::path(args, project);
+    let has_existing_rows = metadata(&path).map(|m| m.len() > 0).unwrap_or(false);
 
     let handle = tokio::spawn(async move {
-      let file = File::create(&path).expect(format!("Failed to create file: {}", path).as_str());
-      let mut writer = Writer::from_writer(file);
+      let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect(format!("Failed to create file: {}", path).as_str());
+      let mut writer = WriterBuilder::new().has_headers(!has_existing_rows).from_writer(file);
       while let Some(hashed) = rx.recv().await {
         writer
           .serialize(&hashed)

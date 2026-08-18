@@ -66,25 +66,35 @@ impl HashingError {
 
 #[tokio::main]
 async fn main() {
-  let args = Args::parse();
+  let args = &Args::parse();
 
   let mut headers = HeaderMap::default();
   headers.append("User-Agent", HeaderValue::from_static("fill-build-hasher (strokkur.24@gmail.com)"));
   headers.append("accept", HeaderValue::from_static("application/json"));
 
-  let client = Client::builder()
+  let client = &Client::builder()
     .timeout(Duration::from_mins(10))
     .default_headers(headers)
     .build()
     .expect("Failed to build reqwest client.");
 
-  let builds = FillBuild::get_all_builds(&args, &client, args.project.clone()).await;
+  let builds = FillBuild::get_all_builds(args, client, args.project.clone()).await;
+  let finished_builds = CsvWriter::read_existing(args, args.project.as_str());
+
+  let builds_len = builds.len() as u64;
+  let builds: Vec<FillBuild> = builds.into_iter().filter(|b| !finished_builds.contains(&(b.version.clone(), b.id))).collect();
+
+  let skipped_builds = builds_len - builds.len() as u64;
+  if skipped_builds > 0 {
+    println!("Skipped {skipped_builds} builds already hashed.");
+  }
 
   let total_bytes: u64 = builds.iter().map(|b| b.size).sum();
 
   let progress = MultiProgress::new();
 
-  let builds_bar = progress.add(ProgressBar::new(builds.len() as u64));
+  let builds_bar = progress.add(ProgressBar::new(builds_len));
+  builds_bar.inc(skipped_builds);
   builds_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {pos}/{len} ({elapsed}) {msg}").unwrap());
   builds_bar.enable_steady_tick(Duration::from_millis(50));
 
@@ -92,7 +102,7 @@ async fn main() {
   bytes_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {eta})").unwrap());
   builds_bar.enable_steady_tick(Duration::from_millis(50));
 
-  let writer = CsvWriter::spawn(&args, args.project.to_string());
+  let writer = CsvWriter::spawn(args, args.project.as_str());
 
   futures::stream::iter(builds)
     .map(|build| {
