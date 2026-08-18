@@ -1,7 +1,9 @@
-use crate::{Args};
+use crate::Args;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Error;
+use tokio_retry::Retry;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 pub type FillError = String;
 
@@ -59,7 +61,7 @@ pub struct FillBuild {
   pub size: u64,
 }
 
-impl  FillBuild {
+impl FillBuild {
   fn from(value: FillBuildResponse, project: String, version: String) -> Self {
     FillBuild {
       project,
@@ -78,11 +80,19 @@ impl FillBuild {
     let mut requests_count: u32 = 0;
     let mut all_builds: Vec<FillBuild> = Vec::new();
 
-    let versions = fetch_project_versions(&client, args.endpoint.clone(), project.as_str()).await.unwrap();
+    let versions = Retry::start(ExponentialBackoff::from_millis(500).map(jitter).take(args.retries), || {
+      fetch_project_versions(client, args.endpoint.clone(), project.as_str())
+    })
+    .await
+    .unwrap_or_else(|err| panic!("Failed to fetch versions for {project} after retries: {err}"));
     requests_count += 1;
 
     for version in versions {
-      let builds = FillBuild::from_url(&client, args.endpoint.clone(), project.clone(), version).await.unwrap();
+      let builds = Retry::start(ExponentialBackoff::from_millis(500).map(jitter).take(args.retries), || {
+        FillBuild::from_url(client, args.endpoint.clone(), project.clone(), version.clone())
+      })
+      .await
+      .unwrap_or_else(|err| panic!("Failed to fetch builds for {project} {version} after retries: {err}"));
       requests_count += 1;
       all_builds.extend(builds);
 
@@ -100,7 +110,6 @@ impl FillBuild {
     all_builds
   }
 
-
   pub async fn from_url(client: &Client, fill: String, project: String, version: String) -> Result<Vec<FillBuild>, FillError> {
     let res = client
       .get(format!("{fill}/projects/{project}/versions/{version}/builds"))
@@ -117,14 +126,19 @@ impl FillBuild {
         .await
         .map_err(|err| format!("Failed to fetch builds for {project} {version}: {err}"))?,
       project.clone(),
-      version.clone()
+      version.clone(),
     )
     .map_err(|err| format!("Failed to fetch builds for {project} {version}: {err}"))
   }
 
   pub fn from_response(response: String, project: String, version: String) -> Result<Vec<FillBuild>, Error> {
     let deserialized: Vec<FillBuildResponse> = serde_json::from_str(response.as_str())?;
-    Ok(deserialized.into_iter().map(|res| FillBuild::from(res, project.clone(), version.clone())).collect())
+    Ok(
+      deserialized
+        .into_iter()
+        .map(|res| FillBuild::from(res, project.clone(), version.clone()))
+        .collect(),
+    )
   }
 }
 

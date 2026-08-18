@@ -12,6 +12,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::time::Duration;
+use tokio_retry::RetryIf;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 #[derive(clap::Parser)]
 pub struct Args {
@@ -22,6 +24,10 @@ pub struct Args {
   /// The number of concurrent downloads to attempt.
   #[arg(long, default_value = "32")]
   pub buffer_size: usize,
+
+  /// The amount of retries for each fill API call, if it fails.
+  #[arg(long, short, default_value = "5")]
+  pub retries: usize,
 
   /// The target *.csv file to write to.
   #[arg(long)]
@@ -36,7 +42,7 @@ pub struct Args {
   pub endpoint: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HashingError {
   BadStatus(u16),
   DownloadFailed(String),
@@ -86,39 +92,44 @@ async fn main() {
   bytes_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {eta})").unwrap());
   builds_bar.enable_steady_tick(Duration::from_millis(50));
 
-  let writer = CsvWriter::new(&args, args.project.to_string());
-  let writer_tx = writer.tx.clone();
-  let writer_task = writer.spawn();
+  let writer = CsvWriter::spawn(&args, args.project.to_string());
 
   futures::stream::iter(builds)
     .map(|build| {
-      let tx = writer_tx.clone();
-      let bytes_bar = bytes_bar.clone();
+      let tx = writer.tx.clone();
+      let bytes_bar_clone = &bytes_bar;
       let client = &client;
       async move {
-        let build = HashingResult::hash_build(build, client, bytes_bar).await;
-        match build.md5 {
-          Ok(_) => match tx.send(HashedFillBuild::from(build.clone())).await {
-            Ok(_) => Ok(build),
-            Err(_) => Err(build),
+        let result = RetryIf::start(
+          ExponentialBackoff::from_millis(500).map(jitter).take(args.retries),
+          || HashingResult::hash_build(&build, client, bytes_bar_clone),
+          |err: &HashingError| match err {
+            HashingError::Sha256Mismatch => false,
+            HashingError::BadStatus(code) => *code >= 500,
+            _ => true,
           },
-          Err(_) => Err(build),
+        )
+        .await;
+        match result {
+          Ok(result) => {
+            let _ = tx.send(HashedFillBuild::from(result)).await.expect("Writer task closed unexpectedly");
+            Ok(())
+          }
+          Err(err) => Err((build, err)),
         }
       }
     })
     .buffer_unordered(args.buffer_size)
     .for_each(|res| {
       builds_bar.inc(1);
-      if let Err(err) = res {
-        builds_bar.println(format!("Failed: {}", err.fill_build.name))
+      if let Err((build, err)) = res {
+        builds_bar.println(format!("Failed to hash {}: {}", build.name, err.to_string()))
       }
       ready(())
     })
     .await;
 
-  drop(writer_tx);
-  writer_task.await.expect("Failed to close writer task.");
-
+  writer.close().await;
   builds_bar.finish_with_message("Done!");
   bytes_bar.finish();
 }

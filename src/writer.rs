@@ -3,7 +3,7 @@ use crate::hashing::HashingResult;
 use csv::Writer;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -22,35 +22,37 @@ impl From<HashingResult> for HashedFillBuild {
       version: result.fill_build.version,
       build: result.fill_build.id,
       file_name: result.fill_build.name,
-      md5: result.md5.expect("Tried to convert failed HashingResult."),
+      md5: result.md5,
     }
   }
 }
 
 pub struct CsvWriter {
   pub tx: Sender<HashedFillBuild>,
-  rx: Receiver<HashedFillBuild>,
-  path: String,
+  pub handle: JoinHandle<()>,
 }
 
 impl CsvWriter {
-  pub fn new(args: &Args, project: String) -> Self {
-    let (tx, rx) = tokio::sync::mpsc::channel::<HashedFillBuild>(128);
+  pub fn spawn(args: &Args, project: String) -> Self {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<HashedFillBuild>(128);
     let path = args.file_path.clone();
     let path = path.unwrap_or(format!("{}.csv", project));
-    Self { tx, rx, path }
-  }
 
-  pub fn spawn(mut self) -> JoinHandle<()> {
-    tokio::spawn(async move {
-      let file = File::create(self.path.clone()).expect(format!("Failed to create file: {}", self.path).as_str());
+    let handle = tokio::spawn(async move {
+      let file = File::create(&path).expect(format!("Failed to create file: {}", path).as_str());
       let mut writer = Writer::from_writer(file);
-      while let Some(hashed) = self.rx.recv().await {
+      while let Some(hashed) = rx.recv().await {
         writer
-          .serialize(HashedFillBuild::from(hashed.clone()))
+          .serialize(&hashed)
           .expect(format!("Failed to write csv record for: {}", hashed.file_name).as_str());
         writer.flush().expect(format!("Failed to flush csv record for: {}", hashed.file_name).as_str());
       }
-    })
+    });
+    Self { tx, handle }
+  }
+
+  pub async fn close(self) {
+    drop(self.tx);
+    self.handle.await.expect("CSV writer task failed.");
   }
 }
