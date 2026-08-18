@@ -3,10 +3,12 @@ mod fill;
 use crate::fill::{FillBuild, fetch_project_versions};
 use clap::Parser;
 use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use md5::Md5;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 pub const FILL_ENDPOINT: &str = "https://fill.papermc.io/v3";
 pub const PROJECTS: [&str; 4] = ["paper", "folia", "velocity", "waterfall"];
@@ -40,17 +42,27 @@ async fn main() {
   headers.append("User-Agent", HeaderValue::from_static("fill-build-hasher (strokkur.24@gmail.com)"));
   headers.append("accept", HeaderValue::from_static("application/json"));
 
-  let client = Client::builder().default_headers(headers).build().expect("Failed to build reqwest client.");
+  let client = Client::builder()
+    .timeout(Duration::from_mins(10))
+    .default_headers(headers).build().expect("Failed to build reqwest client.");
+
   let builds = get_all_builds(&args, &client, "paper").await;
+
+  let progress = ProgressBar::new(builds.len() as u64);
+  progress.set_style(
+    ProgressStyle::with_template("{bar:50.blue/cyan} {pos}/{len} ({elapsed}) {msg}").unwrap()
+  );
+  progress.enable_steady_tick(Duration::from_millis(50));
 
   let hashed_builds: Vec<Result<HashedBuild, HashingError>> = futures::stream::iter(builds)
     .map(|build| hash_build(build, &client))
-    .buffer_unordered(args.buffer_size.unwrap_or(64))
+    .buffer_unordered(args.buffer_size.unwrap_or(32))
+    .inspect(|_| progress.inc(1))
     .collect()
     .await;
 
   for build in hashed_builds {
-    let format = match build {
+    let build_str = match build {
       Ok(hashed) => {
         let name = hashed.fill_build.name;
         let md5 = hashed.md5;
@@ -58,8 +70,10 @@ async fn main() {
       }
       Err(err) => format!("Failed to hash: {:?}", err),
     };
-    println!("{}", format);
+    progress.println(build_str);
   }
+
+  progress.finish_with_message("Done!");
 }
 
 async fn get_all_builds(args: &Args, client: &Client, project: &str) -> Vec<FillBuild> {
