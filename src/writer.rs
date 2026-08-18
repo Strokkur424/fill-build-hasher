@@ -15,6 +15,8 @@ pub struct HashedFillBuild {
   build: u16,
   file_name: String,
   md5: String,
+  sha1: String,
+  sha512: String,
 }
 
 impl From<HashingResult> for HashedFillBuild {
@@ -25,6 +27,8 @@ impl From<HashingResult> for HashedFillBuild {
       build: result.fill_build.id,
       file_name: result.fill_build.name,
       md5: result.md5,
+      sha1: result.sha1,
+      sha512: result.sha512,
     }
   }
 }
