@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure Build Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked --manifest-path=sentinel-app/Cargo.toml
+
+      - name: Configure artifact
+        id: configure
+        shell: bash
+        run: |
+          suffix=${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          
+          raw_file="fill-build-hasher-${{ runner.arch }}-${{ matrix.os }}${suffix}"
+          file_lower=$(echo "$raw_file" | tr '[:upper:]' '[:lower:]')
+          echo "file_name=${file_lower}" >> $GITHUB_ENV
+
+          mv target/release/fill-build-hasher${suffix} target/release/${file_lower}
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/${{ env.file_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
