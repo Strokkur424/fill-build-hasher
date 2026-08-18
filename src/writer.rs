@@ -14,9 +14,29 @@ pub struct HashedFillBuild {
   version: String,
   build: u16,
   file_name: String,
+  download_key: String,
   md5: String,
   sha1: String,
   sha512: String,
+}
+
+#[derive(PartialEq, Eq, Clone, Hash)]
+pub struct HashedFillBuildKey {
+  pub project: String,
+  pub version: String,
+  pub build: u16,
+  pub download_key: String,
+}
+
+impl Into<HashedFillBuildKey> for HashedFillBuild {
+  fn into(self) -> HashedFillBuildKey {
+    HashedFillBuildKey {
+      project: self.project,
+      version: self.version,
+      build: self.build,
+      download_key: self.download_key,
+    }
+  }
 }
 
 impl From<HashingResult> for HashedFillBuild {
@@ -26,6 +46,7 @@ impl From<HashingResult> for HashedFillBuild {
       version: result.fill_build.version,
       build: result.fill_build.id,
       file_name: result.fill_build.name,
+      download_key: result.fill_build.download_key,
       md5: result.md5,
       sha1: result.sha1,
       sha512: result.sha512,
@@ -43,7 +64,7 @@ impl CsvWriter {
     args.file_path.clone().unwrap_or(format!("{}.csv", project))
   }
 
-  pub fn read_existing(args: &Args, project: &str) -> HashSet<(String, String, u16)> {
+  pub fn read_existing(args: &Args, project: &str) -> HashSet<HashedFillBuildKey> {
     let path = Self::path(args, project);
     let file = match File::open(&path) {
       Ok(file) => file,
@@ -53,7 +74,7 @@ impl CsvWriter {
 
     Reader::from_reader(file)
       .deserialize::<HashedFillBuild>()
-      .filter_map(|val| val.ok().map(|v| (v.project, v.version, v.build)))
+      .filter_map(|val| val.ok().map(Into::into))
       .collect()
   }
 

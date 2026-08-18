@@ -95,10 +95,7 @@ async fn run_for_project(args: &Args, client: &Client, project: &str) {
   let finished_builds = CsvWriter::read_existing(args, project);
 
   let builds_len = builds.len() as u64;
-  let builds: Vec<FillBuild> = builds
-    .into_iter()
-    .filter(|b| !finished_builds.contains(&(project.to_string(), b.version.clone(), b.id)))
-    .collect();
+  let builds: Vec<FillBuild> = builds.into_iter().filter(|b| !finished_builds.contains(&b.clone().into())).collect();
 
   let skipped_builds = builds_len - builds.len() as u64;
   if skipped_builds > 0 {

@@ -1,7 +1,9 @@
 use crate::Args;
+use crate::writer::HashedFillBuildKey;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Error;
+use std::collections::HashMap;
 use tokio_retry::Retry;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
@@ -11,13 +13,7 @@ pub type FillError = String;
 #[derive(Deserialize)]
 struct FillBuildResponse {
   id: u16,
-  downloads: FillBuildResponseDownloads,
-}
-
-#[derive(Deserialize)]
-struct FillBuildResponseDownloads {
-  #[serde(rename = "server:default")]
-  server_default: FillBuildResponseDownload,
+  downloads: HashMap<String, FillBuildResponseDownload>,
 }
 
 #[derive(Deserialize)]
@@ -56,22 +52,39 @@ pub struct FillBuild {
   pub version: String,
   pub id: u16,
   pub name: String,
+  pub download_key: String,
   pub sha256: String,
   pub url: String,
   pub size: u64,
 }
 
-impl FillBuild {
-  fn from(value: FillBuildResponse, project: String, version: String) -> Self {
-    FillBuild {
-      project,
-      version,
-      id: value.id,
-      name: value.downloads.server_default.name,
-      sha256: value.downloads.server_default.checksums.sha256,
-      url: value.downloads.server_default.url,
-      size: value.downloads.server_default.size,
+impl Into<HashedFillBuildKey> for FillBuild {
+  fn into(self) -> HashedFillBuildKey {
+    HashedFillBuildKey {
+      project: self.project,
+      version: self.version,
+      build: self.id,
+      download_key: self.download_key,
     }
+  }
+}
+
+impl FillBuild {
+  fn from(value: FillBuildResponse, project: String, version: String) -> Vec<FillBuild> {
+    value
+      .downloads
+      .into_iter()
+      .map(|i| FillBuild {
+        project: project.clone(),
+        version: version.clone(),
+        id: value.id,
+        name: i.1.name,
+        download_key: i.0,
+        sha256: i.1.checksums.sha256,
+        url: i.1.url,
+        size: i.1.size,
+      })
+      .collect()
   }
 }
 
@@ -136,7 +149,7 @@ impl FillBuild {
     Ok(
       deserialized
         .into_iter()
-        .map(|res| FillBuild::from(res, project.clone(), version.clone()))
+        .flat_map(|res| FillBuild::from(res, project.clone(), version.clone()))
         .collect(),
     )
   }
