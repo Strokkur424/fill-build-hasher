@@ -27,7 +27,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release
-        run: cargo build --release --locked --manifest-path=sentinel-app/Cargo.toml
+        run: cargo build --release --locked
 
       - name: Configure artifact
         id: configure
