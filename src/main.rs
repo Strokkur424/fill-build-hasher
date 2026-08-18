@@ -1,48 +1,49 @@
 mod fill;
+mod hashing;
+mod writer;
 
-use crate::fill::{FillBuild, fetch_project_versions};
+use crate::fill::FillBuild;
+use crate::hashing::HashingResult;
+use crate::writer::{CsvWriter, HashedFillBuild};
 use clap::Parser;
-use futures::StreamExt;
+use future::ready;
+use futures::{StreamExt, future};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use md5::Md5;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-pub const FILL_ENDPOINT: &str = "https://fill.papermc.io/v3";
-pub const PROJECTS: [&str; 4] = ["paper", "folia", "velocity", "waterfall"];
-
 #[derive(clap::Parser)]
-struct Args {
+pub struct Args {
+  /// The max amount of builds to download. Can be used for testing purposes.
   #[arg(long)]
-  limit: Option<u32>,
+  pub limit: Option<u32>,
 
+  /// The number of concurrent downloads to attempt.
+  #[arg(long, default_value = "32")]
+  pub buffer_size: usize,
+
+  /// The target *.csv file to write to.
   #[arg(long)]
-  buffer_size: Option<usize>,
+  pub file_path: Option<String>,
+
+  /// The project to iterate all builds in.
+  #[arg(long, short, required = true)]
+  pub project: String,
+
+  /// The fill endpoint to use.
+  #[arg(long, default_value = "https://fill.papermc.io/v3")]
+  pub endpoint: String,
 }
 
-struct HashedBuild {
-  fill_build: FillBuild,
-  md5: Result<String, HashingError>,
-}
-
-impl HashedBuild {
-  fn err(fill_build: FillBuild, err: HashingError) -> Self {
-    Self { fill_build, md5: Err(err) }
-  }
-
-  fn ok(fill_build: FillBuild, md5: String) -> Self {
-    Self { fill_build, md5: Ok(md5) }
-  }
-}
-
-#[derive(Debug)]
-enum HashingError {
+#[derive(Debug, Clone)]
+pub enum HashingError {
   BadStatus(u16),
-  DownloadFailed(reqwest::Error),
+  DownloadFailed(String),
   DownloadFailedNoBody,
   Sha256Mismatch,
+
+  WriterDroppedEntry,
 }
 
 impl HashingError {
@@ -52,6 +53,7 @@ impl HashingError {
       HashingError::DownloadFailed(err) => format!("Failed to download: {}", err),
       HashingError::DownloadFailedNoBody => "Failed to download: no body returned".to_string(),
       HashingError::Sha256Mismatch => "Invalid Sha256 of downloaded artefact".to_string(),
+      HashingError::WriterDroppedEntry => "Failed to write hashed to csv file".to_string(),
     }
   }
 }
@@ -70,7 +72,7 @@ async fn main() {
     .build()
     .expect("Failed to build reqwest client.");
 
-  let builds = get_all_builds(&args, &client, "paper").await;
+  let builds = FillBuild::get_all_builds(&args, &client, args.project.clone()).await;
 
   let total_bytes: u64 = builds.iter().map(|b| b.size).sum();
 
@@ -84,84 +86,39 @@ async fn main() {
   bytes_bar.set_style(ProgressStyle::with_template("{bar:50.blue/cyan} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {eta})").unwrap());
   builds_bar.enable_steady_tick(Duration::from_millis(50));
 
-  let hashed_builds: Vec<HashedBuild> = futures::stream::iter(builds)
-    .map(|build| hash_build(build, &client, bytes_bar.clone()))
-    .buffer_unordered(args.buffer_size.unwrap_or(32))
-    .inspect(|_| builds_bar.inc(1))
-    .collect()
+  let writer = CsvWriter::new(&args, args.project.to_string());
+  let writer_tx = writer.tx.clone();
+  let writer_task = writer.spawn();
+
+  futures::stream::iter(builds)
+    .map(|build| {
+      let tx = writer_tx.clone();
+      let bytes_bar = bytes_bar.clone();
+      let client = &client;
+      async move {
+        let build = HashingResult::hash_build(build, client, bytes_bar).await;
+        match build.md5 {
+          Ok(_) => match tx.send(HashedFillBuild::from(build.clone())).await {
+            Ok(_) => Ok(build),
+            Err(_) => Err(build),
+          },
+          Err(_) => Err(build),
+        }
+      }
+    })
+    .buffer_unordered(args.buffer_size)
+    .for_each(|res| {
+      builds_bar.inc(1);
+      if let Err(err) = res {
+        builds_bar.println(format!("Failed: {}", err.fill_build.name))
+      }
+      ready(())
+    })
     .await;
 
-  for build in hashed_builds {
-    let name = build.fill_build.name;
-    let build_str = match build.md5 {
-      Ok(hash) => {
-        format!("MD5 hash of {name} is {hash}")
-      }
-      Err(err) => format!("Failed to hash {name}: {}", err.to_string()),
-    };
-    builds_bar.println(build_str);
-  }
+  drop(writer_tx);
+  writer_task.await.expect("Failed to close writer task.");
 
   builds_bar.finish_with_message("Done!");
   bytes_bar.finish();
-}
-
-async fn get_all_builds(args: &Args, client: &Client, project: &str) -> Vec<FillBuild> {
-  let mut requests_count: u32 = 0;
-  let mut all_builds: Vec<FillBuild> = Vec::new();
-
-  let versions = fetch_project_versions(&client, project).await.unwrap();
-  requests_count += 1;
-
-  for version in versions {
-    let builds = FillBuild::from_url(&client, project, version.as_str()).await.unwrap();
-    requests_count += 1;
-    all_builds.extend(builds);
-
-    if args.limit.is_some() && all_builds.len() > args.limit.unwrap() as usize {
-      break;
-    }
-  }
-
-  if args.limit.is_some() {
-    all_builds.truncate(args.limit.unwrap() as usize)
-  }
-
-  println!();
-  println!("Total API requests: {requests_count}");
-  all_builds
-}
-
-async fn hash_build(build: FillBuild, client: &Client, bytes_bar: ProgressBar) -> HashedBuild {
-  let response = client.get(&build.url).send().await;
-  let response = match response {
-    Ok(ok) => ok,
-    Err(e) => return HashedBuild::err(build, HashingError::DownloadFailed(e)),
-  };
-
-  if !response.status().is_success() {
-    return HashedBuild::err(build, HashingError::BadStatus(response.status().as_u16()));
-  }
-
-  let mut sha256_hasher = Sha256::new();
-  let mut md5_hasher = Md5::new();
-
-  let mut stream = response.bytes_stream();
-  while let Some(chunk) = stream.next().await {
-    let chunk = match chunk {
-      Ok(ok) => ok,
-      Err(_) => return HashedBuild::err(build, HashingError::DownloadFailedNoBody),
-    };
-    sha256_hasher.update(&chunk);
-    md5_hasher.update(&chunk);
-    bytes_bar.inc(chunk.len() as u64);
-  }
-
-  let sha256 = hex::encode(sha256_hasher.finalize());
-  if sha256 != build.sha256 {
-    return HashedBuild::err(build, HashingError::Sha256Mismatch);
-  }
-
-  let md5 = hex::encode(md5_hasher.finalize());
-  HashedBuild::ok(build, md5)
 }
